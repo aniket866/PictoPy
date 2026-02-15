@@ -6,6 +6,7 @@ on:
 
 permissions:
   issues: write
+  contents: read
 
 jobs:
   detect-duplicates:
@@ -15,7 +16,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
       - name: Install dependencies
         run: |
@@ -25,7 +26,8 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            const fs = require('fs');
+            const fs = require("fs");
+
             const issue = context.payload.issue;
 
             const upstreamIssues = await github.paginate(
@@ -38,21 +40,21 @@ jobs:
               }
             );
 
+            const filtered = upstreamIssues
+              .filter(i => !i.pull_request);
+
             const data = {
               current: {
-                number: issue.number,
                 title: issue.title,
                 body: issue.body || ""
               },
-              others: upstreamIssues
-                .filter(i => !i.pull_request)
-                .map(i => ({
-                  number: i.number,
-                  title: i.title,
-                  body: i.body || "",
-                  url: i.html_url,
-                  state: i.state
-                }))
+              others: filtered.map(i => ({
+                number: i.number,
+                title: i.title,
+                body: i.body || "",
+                url: i.html_url,
+                state: i.state
+              }))
             };
 
             fs.writeFileSync("issues.json", JSON.stringify(data));
@@ -64,28 +66,28 @@ jobs:
           from sentence_transformers import SentenceTransformer
           from sklearn.metrics.pairwise import cosine_similarity
 
-          THRESHOLD = 0.82
+          THRESHOLD = 0.75   # Lowered slightly for reliable testing
           MAX_RESULTS = 3
 
           with open("issues.json") as f:
-            data = json.load(f)
+              data = json.load(f)
 
           model = SentenceTransformer("all-MiniLM-L6-v2")
 
           def text(issue):
-            return f"{issue['title']} {issue['body']}".strip()
+              return f"{issue['title']} {issue['body']}".strip()
 
           current_text = text(data["current"])
           others = data["others"]
 
           if not others:
-            with open("matches.json", "w") as f:
-              json.dump([], f)
-            exit()
+              with open("matches.json", "w") as f:
+                  json.dump([], f)
+              exit()
 
           embeddings = model.encode(
-            [current_text] + [text(i) for i in others],
-            normalize_embeddings=True
+              [current_text] + [text(i) for i in others],
+              normalize_embeddings=True
           )
 
           current_vec = embeddings[0]
@@ -95,22 +97,22 @@ jobs:
 
           matches = []
           for issue, score in zip(others, sims):
-            if score >= THRESHOLD:
-              matches.append({
-                "number": issue["number"],
-                "title": issue["title"],
-                "url": issue["url"],
-                "state": issue["state"],
-                "score": round(float(score) * 100, 1)
-              })
+              if score >= THRESHOLD:
+                  matches.append({
+                      "number": issue["number"],
+                      "title": issue["title"],
+                      "url": issue["url"],
+                      "state": issue["state"],
+                      "score": round(float(score) * 100, 1)
+                  })
 
           matches = sorted(matches, key=lambda x: x["score"], reverse=True)[:MAX_RESULTS]
 
           with open("matches.json", "w") as f:
-            json.dump(matches, f)
+              json.dump(matches, f)
           EOF
 
-      - name: Comment and soft-label in fork (non-blocking)
+      - name: Comment and soft-label in fork
         uses: actions/github-script@v7
         with:
           script: |
@@ -129,23 +131,18 @@ jobs:
                 `   Similarity: ${m.score}%`
             ).join("\n\n");
 
-            const safe = async (fn) => {
-              try { await fn(); }
-              catch (e) { core.notice(`Skipped write action: ${e.message}`); }
-            };
+            const body =
+              `⚠️ **Potential Duplicate Issue (Semantic Match)**\n\n` +
+              `This issue appears similar to the following issues in AOSSIE-Org/PictoPy:\n\n` +
+              `${list}\n\n` +
+              `Please review before proceeding.`;
 
-            await safe(() =>
-              github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: context.payload.issue.number,
-                body:
-                  `⚠️ **Potential Duplicate Issue (Semantic Match)**\n\n` +
-                  `This issue appears semantically similar to the following issues in AOSSIE-Org/PictoPy:\n\n` +
-                  `${list}\n\n` +
-                  `Please review before proceeding.`
-              })
-            );
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.issue.number,
+              body: body
+            });
 
             const labelName = "possible-duplicate";
 
@@ -157,23 +154,19 @@ jobs:
               });
             } catch (e) {
               if (e.status === 404) {
-                await safe(() =>
-                  github.rest.issues.createLabel({
-                    owner: context.repo.owner,
-                    repo: context.repo.repo,
-                    name: labelName,
-                    color: "FBCA04",
-                    description: "Potential semantic duplicate (upstream comparison)"
-                  })
-                );
+                await github.rest.issues.createLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  name: labelName,
+                  color: "FBCA04",
+                  description: "Potential semantic duplicate (compared with upstream)"
+                });
               }
             }
 
-            await safe(() =>
-              github.rest.issues.addLabels({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: context.payload.issue.number,
-                labels: [labelName]
-              })
-            );
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.issue.number,
+              labels: [labelName]
+            });
